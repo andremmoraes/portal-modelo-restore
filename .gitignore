@@ -1,0 +1,6 @@
+# dados restaurados (ZODB + blobs) — não versionar
+data/
+*/data/
+
+# backups grandes baixados pelo script
+*.backup.tar.gz
