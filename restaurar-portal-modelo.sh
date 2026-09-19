@@ -256,10 +256,11 @@ else
   echo "      Não encontrei um id padrão; confira a lista de sites na página inicial."
 fi
 
+PROJ_DIR="$(cd "$DIR" && pwd)"
 echo
 echo "======================================================================"
 echo " PORTAL RESTAURADO!"
-echo "   Pasta      : $PWD/$DIR"
+echo "   Pasta      : $PROJ_DIR"
 echo "   Site       : $URL_FINAL"
 echo "   Containers : pm-${CIDADE}-zeoserver / pm-${CIDADE}-plone"
 echo "   Backup     : $BACKUP_ARQ"
@@ -270,5 +271,5 @@ echo "    (não é 'adminpw'). Para redefini-la, abra o ZMI:"
 echo "      ${URL_FINAL}manage_main  ->  acl_users -> admin"
 echo "  - Se o portal original for de versão antiga, rode os upgrades do"
 echo "    Portal Modelo após a restauração (ver 'run-portal-upgrades')."
-echo "  - Para derrubar: (cd $PWD/$DIR && docker compose down)"
+echo "  - Para derrubar: (cd $PROJ_DIR && docker compose down)"
 echo "======================================================================"
