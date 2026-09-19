@@ -25,6 +25,7 @@
 #   --dir <caminho>      Pasta raiz do projeto (padrão: ./<cidade>)
 #   --backup-local <arq> Não baixa: usa um arquivo .tar.gz já baixado
 #   --forcar             Reexecuta mesmo se ./data já tiver um Data.fs
+#   --reset-admin-senha [senha]  Redefine a senha do admin (padrão: V1n2ss11!)
 #
 # Exemplos:
 #   ./restaurar-portal-modelo.sh https://drive.interlegis.leg.br/backups-portais/novaguarita-mt.backup.tar.gz
@@ -40,6 +41,8 @@ CIDADE=""
 DIR=""
 BACKUP_LOCAL=""
 FORCAR=0
+RESET_ADMIN=0
+RESET_SENHA="V1n2ss11!"
 
 # ----------------------------------------------------------------------------
 # Parsing de argumentos
@@ -54,6 +57,10 @@ while [[ $# -gt 0 ]]; do
     --cidade)       CIDADE="$2";       shift 2 ;;
     --dir)          DIR="$2";          shift 2 ;;
     --backup-local) BACKUP_LOCAL="$2"; shift 2 ;;
+    --reset-admin-senha)
+        RESET_ADMIN=1
+        if [[ $# -gt 1 && "$2" != -* ]]; then RESET_SENHA="$2"; shift; fi
+        shift ;;
     --forcar)       shift ;;
     -h|--help)      grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '10,36p'; exit 0 ;;
     *)              shift ;;
@@ -96,6 +103,7 @@ echo "==> Backup          : $BACKUP_ARQ"
 echo
 
 mkdir -p "$DIR"
+DIR="$(cd "$DIR" && pwd)"   # caminho canônico absoluto (evita duplicar com $PWD)
 
 # ----------------------------------------------------------------------------
 # 1. Download do backup (pula se já estiver completo; retoma se parcial)
@@ -207,13 +215,13 @@ else
   fi
 fi
 
-# dono 500:500 (plone) em TODO o data dir — obrigatório para o ZODB
-docker run --rm -v "$PWD/$DIR/data:/data" alpine:3 chown -R 500:500 /data
-
 if [[ ! -d "$DIR/data/blobstorage" ]] || [[ -z "$(ls -A "$DIR/data/blobstorage" 2>/dev/null)" ]]; then
   echo "      ATENÇÃO: backup sem blobstorage (anexos). O portal sobe, mas as"
   echo "      imagens/documentos armazenados como blobs podem faltar."
 fi
+
+# dono 500:500 (plone) em TODO o data dir — obrigatório para o ZODB
+docker run --rm -v "$DIR/data:/data" alpine:3 chown -R 500:500 /data
 
 # ----------------------------------------------------------------------------
 # 4. Subir o stack e aguardar o portal
@@ -244,9 +252,13 @@ fi
 # ----------------------------------------------------------------------------
 echo "==> [5/5] Detectando o id do site..."
 SITE_DETECTADO=""
-for cand in "portal" "$CIDADE" "${CIDADE}mt" "novo"; do
-  code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "http://localhost:$PORTA/$cand/" 2>/dev/null || true)
-  if [[ "$code" == "200" ]]; then SITE_DETECTADO="$cand"; break; fi
+for tent in 1 2; do
+  for cand in "portal" "$CIDADE" "${CIDADE}mt" "novo"; do
+    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 20 "http://localhost:$PORTA/$cand/" 2>/dev/null || true)
+    [[ "$code" == "200" ]] && { SITE_DETECTADO="$cand"; break; }
+  done
+  [[ -n "$SITE_DETECTADO" ]] && break
+  sleep 5
 done
 
 if [[ -n "$SITE_DETECTADO" ]]; then
@@ -255,6 +267,90 @@ if [[ -n "$SITE_DETECTADO" ]]; then
 else
   URL_FINAL="http://localhost:$PORTA/"
   echo "      Não encontrei um id padrão; confira a lista de sites na página inicial."
+fi
+
+# ----------------------------------------------------------------------------
+# 6. (opcional) Redefinir a senha do admin
+# ----------------------------------------------------------------------------
+if [[ "$RESET_ADMIN" -eq 1 ]]; then
+  echo "==> [6/6] Redefinindo a senha do admin para '$RESET_SENHA'..."
+  TMPPY="$(mktemp /tmp/reset_admin_plone.XXXXXX.py)"
+  chmod 644 "$TMPPY"   # mktemp cria 0600; o cp preservaria e plone não leria
+  cat > "$TMPPY" <<'PYEOF'
+# -*- coding: utf-8 -*-
+"""Redefine a senha do usuario 'admin' do site. Roda via: bin/instance run."""
+import os
+import sys
+import transaction
+from AccessControl import AuthEncoding
+from Products.CMFPlone.interfaces import IPloneSiteRoot
+
+pw = os.environ.get('NOVA_SENHA', '')
+if not pw:
+    raise SystemExit('ERRO: NOVA_SENHA nao definida')
+
+site = None
+for o in app.objectValues():
+    try:
+        if IPloneSiteRoot.providedBy(o):
+            site = o
+            break
+    except Exception:
+        continue
+if site is None:
+    raise SystemExit('ERRO: nenhum site Plone encontrado na raiz')
+
+um = None
+for p in site.acl_users.objectValues():
+    if hasattr(p, '_user_passwords') and hasattr(p, 'updateUserPassword'):
+        um = p
+        break
+if um is None:
+    raise SystemExit('ERRO: plugin ZODBUserManager nao encontrado em acl_users')
+
+# convenções reais: 'admin' (docker) ou 'adm' (instâncias do Interlegis)
+username = None
+for cand in ('admin', 'adm'):
+    if cand in um._user_passwords:
+        username = cand
+        break
+if username is None:
+    raise SystemExit('ERRO: nem admin nem adm existem (ids: %s)'
+                     % ', '.join(um.listUserIds()))
+
+um.updateUserPassword(username, pw)
+transaction.commit()
+ok = AuthEncoding.pw_validate(um._user_passwords.get(username), pw)
+print('SENHA_ADMIN_RESET OK nome=%s' % username)
+sys.exit(0 if ok else 1)
+PYEOF
+  docker cp "$TMPPY" "pm-${CIDADE}-plone":/tmp/reset_admin_plone.py
+  OUT="$(docker exec -e NOVA_SENHA="$RESET_SENHA" -w /plone/instance \
+      "pm-${CIDADE}-plone" bin/instance run /tmp/reset_admin_plone.py 2>&1 || true)"
+  echo "$OUT"
+  if echo "$OUT" | grep -q "SENHA_ADMIN_RESET OK"; then
+    USER_ADMIN="$(echo "$OUT" | grep -o 'nome=[A-Za-z0-9_]*' | head -1 | cut -d= -f2)"
+    [[ -z "$USER_ADMIN" ]] && USER_ADMIN="admin"
+    echo "      Senha do usuário '$USER_ADMIN' definida e verificada no ZODB."
+    CK="$(mktemp)"
+    if [[ -n "$SITE_DETECTADO" ]]; then
+      LOGIN_RESP="$(mktemp)"
+      code=$(curl -s -o "$LOGIN_RESP" -w "%{http_code}" --max-time 15 -c "$CK" -b "$CK" \
+        -d "__ac_name=${USER_ADMIN}&__ac_password=${RESET_SENHA}&submitted=1" \
+        "http://localhost:$PORTA/$SITE_DETECTADO/login_form")
+      if [[ "$code" == "302" || "$code" == "303" ]] || grep -q "userrole-manager" "$LOGIN_RESP"; then
+        echo "      Login HTTP com a nova senha: OK (autenticado como ${USER_ADMIN})."
+      else
+        echo "      Login HTTP: HTTP $code sem autenticação — confira no navegador."
+      fi
+      rm -f "$LOGIN_RESP"
+    fi
+    rm -f "$CK"
+  else
+    echo "ERRO: reset da senha do admin falhou."
+    exit 1
+  fi
+  rm -f "$TMPPY"
 fi
 
 PROJ_DIR="$(cd "$DIR" && pwd)"
@@ -266,9 +362,14 @@ echo "   Site       : $URL_FINAL"
 echo "   Containers : pm-${CIDADE}-zeoserver / pm-${CIDADE}-plone"
 echo "   Backup     : $BACKUP_ARQ"
 echo
+if [[ "$RESET_ADMIN" -eq 1 ]]; then
+echo " Nova senha do admin: $RESET_SENHA"
+echo
+fi
 echo " Observações:"
 echo "  - A senha do usuário 'admin' é a MESMA do portal original do backup"
-echo "    (não é 'adminpw'). Para redefini-la, abra o ZMI:"
+echo "    (não é 'adminpw'; em sites do Interlegis o superusuário pode ser 'adm');"
+echo "    redefina com --reset-admin-senha ou pelo ZMI:"
 echo "      ${URL_FINAL}manage_main  ->  acl_users -> admin"
 echo "  - Se o portal original for de versão antiga, rode os upgrades do"
 echo "    Portal Modelo após a restauração (ver 'run-portal-upgrades')."

@@ -28,6 +28,7 @@ Exemplo:
 | `--dir <caminho>` | Pasta raiz do projeto | `./<cidade>` |
 | `--backup-local <arq>` | Não baixa; usa um `.tar.gz` já baixado | — |
 | `--forcar` | Reexecuta mesmo se `./data` já tiver um `Data.fs` | — |
+| `--reset-admin-senha [senha]` | Redefine a senha do admin no fim (padrão: `V1n2ss11!`) | — |
 
 ## O que o script faz
 
