@@ -148,6 +148,7 @@ else
 # Comandos úteis:
 #   docker compose logs -f plone    # acompanhar o boot
 #   docker compose down             # derrubar (dados ficam em ./data)
+name: pm-${CIDADE}-restore
 services:
   zeoserver:
     image: $IMAGEM
